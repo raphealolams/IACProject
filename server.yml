@@ -1,0 +1,218 @@
+Description: >
+    Raphael Ajilore Udacity Project On IAC
+
+Parameters:
+    EnvironmentName:
+        Description: An Environment name that will be prefixed to resources
+        Type: String
+    
+    SSHLocation:
+        AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(/([0-9]|[1-2][0-9]|3[0-2]))$
+        ConstraintDescription: CIDR block parameter must be in the form x.x.x.x/0-28
+        Default: 0.0.0.0/0
+        Description: 
+            "Network allowed to SSH to Host or instances in Private Subnet. 
+            For maximum security this should be limited to a local private IP."
+        Type: String
+    
+    KeyPairName:
+        Description: Keypair for Host
+        Default: EC2InstanceAdministratorKey
+        Type: AWS::EC2::KeyPair::KeyName
+
+Mappings:
+    RegionMap:
+        us-east-1:
+            AMI: ami-22ce4934
+        us-west-1:
+            AMI: ami-9e247efe
+        us-east-2:
+            AMI: ami-7bfcd81e
+        us-west-2:
+            AMI: ami-8ca83fec
+
+Resources:
+
+    WebServerBastionHostSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Enable SSH access via port 22
+            VpcId: 
+                Fn::ImportValue:
+                    !Sub '${EnvironmentName}-VPCID'
+            SecurityGroupIngress:
+            -   CidrIp:     !Ref SSHLocation    # Describe the IP range
+                IpProtocol: tcp
+                FromPort:   22          
+                ToPort:     22
+
+    LBSecGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow http to our load balancer
+            VpcId:
+                Fn::ImportValue:
+                    !Sub '${EnvironmentName}-VPCID'
+            SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+            SecurityGroupEgress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+
+    WebServerSecGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            GroupDescription: Allow http to our hosts and SSH from our local only
+            VpcId:
+                Fn::ImportValue:
+                    !Sub '${EnvironmentName}-VPCID'
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 8080
+                  ToPort: 8080
+                  CidrIp: 0.0.0.0/0
+                - IpProtocol: tcp
+                  FromPort: 22
+                  ToPort: 22
+                  CidrIp: 0.0.0.0/0
+            SecurityGroupEgress:
+                - IpProtocol: tcp
+                  FromPort: 0
+                  ToPort: 65535
+                  CidrIp: 0.0.0.0/0
+    
+    WebAppLaunchConfig:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    # A simple Hello World from the User-Data script
+                    echo "DEBUG -- Hello from user-data!"
+
+                    # Log EC2 Linux user-data to the console
+                    exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+                    # Update the local package registry
+                    echo "DEBUG -- Attempting to update apt packages"
+                    apt-get update -y
+
+                    # Install the Apache Server
+                    echo "DEBUG -- Attempting to install the Apache Web Server"
+                    apt-get install apache2 -y
+                    # Start the Apache Server
+                    echo "DEBUG -- Attempting to start the Apache Web Server"
+                    systemctl start apache2.service
+                    # Enable the Apache Server
+                    echo "DEBUG -- Attempting to enable the Apache Web Server"
+                    systemctl enable apache2.service
+                    # Check the status of the Apache Server
+                    echo "DEBUG -- Attempting to check the status of the Apache Web Server"
+                    systemctl status apache2.service
+
+                    # Copy site files from S3 to local directory
+                    echo "DEBUG -- Attepmting to copy the site files from the S3 bucket to the local directory"
+                    wget -P ../../var/www/html https://course-02-project.s3-us-west-2.amazonaws.com/index.html
+
+            ImageId: ami-005bdb005fb00e791
+            SecurityGroups:
+                - Ref: WebServerSecGroup
+            InstanceType: t2.micro
+            BlockDeviceMappings:
+                - DeviceName: "/dev/sdk"
+                  Ebs:
+                    VolumeSize: '10'
+            
+    WebAppGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            VPCZoneIdentifier:
+            - Fn::ImportValue:
+                !Sub '${EnvironmentName}-PRIV-NETS'
+            LaunchConfigurationName: 
+                Ref: WebAppLaunchConfig
+            MinSize: '2'
+            MaxSize: '2'
+            TargetGroupARNs: 
+                - Ref: WebAppTargetGroup
+
+    WebAppLB:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            LoadBalancerAttributes:
+                -  Key: access_logs.s3.enabled
+                   Value: true
+                   Key: access_logs.s3.bucket
+                   Value: !Sub '${EnvironmentName}-AccessLogsS3Bucket'
+            Subnets:
+                - Fn::ImportValue: !Sub '${EnvironmentName}-PUB1-SN'
+                - Fn::ImportValue: !Sub ${EnvironmentName}-PUB2-SN
+            SecurityGroups: 
+                - !Ref LBSecGroup
+
+    Listener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties: 
+            DefaultActions:
+                - Type: forward
+                  TargetGroupArn: !Ref WebAppTargetGroup
+            LoadBalancerArn: !Ref WebAppLB
+            Port: '80'
+            Protocol: HTTP
+
+    ALBListenerRule:
+        Type: AWS::ElasticLoadBalancingV2::ListenerRule
+        Properties:
+            Actions: 
+                - Type: forward
+                  TargetGroupArn: !Ref 'WebAppTargetGroup'
+            Conditions: 
+                - Field: path-pattern
+                  Values: [/]
+
+            ListenerArn: !Ref 'Listener'
+            Priority: 1
+
+    WebAppTargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+            HealthCheckIntervalSeconds: 35
+            HealthCheckPath: /
+            HealthCheckProtocol: HTTP
+            HealthCheckTimeoutSeconds: 30
+            HealthyThresholdCount: 2
+            Port: 80
+            Protocol: HTTP
+            UnhealthyThresholdCount: 5
+            VpcId: 
+                Fn::ImportValue:
+                    Fn::Sub: '${EnvironmentName}-VPCID'
+
+    
+    WebServerBastionHost:
+        Type: AWS::EC2::Instance
+        DependsOn:
+        - !Sub InternetGatewayAttachment
+        Properties:
+            KeyName: !Ref KeyPairName
+            ImageId: !FindInMap [ RegionMap, !Ref AWS::Region, AMI ]
+            InstanceType: t2.micro
+            NetworkInterfaces:
+            -   AssociatePublicIpAddress: true
+                DeleteOnTermination: true
+                Description: host
+                DeviceIndex: 0
+                SubnetId: !Sub ${EnvironmentName}-PRIV-NETS
+                GroupSet:
+                - !Ref WebServerBastionHostSecurityGroup
+
+Outputs:
+    LBURL:
+        Description: Load balancer public url
+        Value: !Join [ "", [ 'http://', !GetAtt WebAppLoadBalancer.DNSName ]]
+        Export:
+            Name: !Sub ${EnvironmentName}-LB-DNSName

@@ -1,0 +1,78 @@
+Description: >
+    Raphael Ajilore Udacity Project On IAC
+
+Parameters:
+    Bucket:
+        Default: 'course-02-project'
+        Description: 'Bucket containing website files'
+        Type: String
+
+    AccessLogsS3Bucket:
+        Default: "course-02-project-logs"
+        Description:
+            "S3 bucket name to place the logs in. The value of 'access_logs.s3.bucket' cannot be greater than 63 characters"
+        Type: String
+
+Resources:
+    S3AccessIAMRole:
+        Type: AWS::IAM::Role
+        Properties: 
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                -   Effect: Allow
+                    Principal:
+                        Service:
+                        -   ec2.amazonaws.com
+                    Action:
+                    -   sts:AssumeRole
+            Path: "/"
+
+    
+    S3AccessIAMPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+            PolicyDocument:
+                Statement:
+                -   Effect: Allow
+                    Action:
+                    -   s3:GetObject*
+                    Resource: "*"
+            PolicyName: S3AccessIAMPolicy
+            Roles:
+            -   Ref: S3AccessIAMRole
+
+    S3AccessInstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Path: "/"
+            Roles:
+            -   Ref: S3AccessIAMRole
+
+
+    S3AccessBucketPolicy:
+        Type: AWS::S3::BucketPolicy
+        Properties:
+            Bucket: !Ref Bucket
+            PolicyDocument:
+                Statement:
+                -   Action:
+                    -   s3:GetObject
+                    Effect: Allow
+                    Principal: '*'
+                    Resource:
+                        Fn::Join: 
+                        -   ""
+                        - 
+                            - "arn:aws:s3:::"
+                            - 
+                                Ref: "Bucket"
+                            -   "/*" 
+                
+Outputs:
+
+    S3Output:
+        Description: Access Logs for S3 Bucket
+        Value: !Ref AccessLogsS3Bucket
+        Export:
+            Name: !Sub ${EnvironmentName}-AccessLogsS3Bucket
